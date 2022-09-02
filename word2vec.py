@@ -5,6 +5,9 @@ from datasets import load_dataset
 import re
 from tqdm import tqdm
 from pprint import pprint
+import random
+import pickle
+import itertools
 
 
 
@@ -13,7 +16,9 @@ class Word2Vec:
     def __init__(self, ds):
         
         self.word_count = self.count_words(ds)
-        self.word_count = self.filter_top(self.word_count, num=100000)
+        self.word_count = self.filter_top(self.word_count, num=10000)
+
+        # {word: o, c}
         self.word_map = self.init_vec(self.word_count)
     
     def __getitem__(self):
@@ -63,11 +68,207 @@ class Word2Vec:
                 break
 
         return first_bunch
+
     def init_vec(self, word_count):
         vecs = {}
         for key in tqdm(word_count, "Generating Vectors"):
-            vecs[key] = (np.random.rand(1, 256), np.random.rand(1, 256))
+            o = np.random.rand(1, 256)
+            o /= np.sqrt(np.dot(o, o.T))
+
+            c = np.random.rand(1, 256)
+            c /= np.sqrt(np.dot(c, c.T))
+
+            vecs[key] = [o, c]
         return vecs
+
+    def save(self, path):
+
+        with open(path, "wb") as f:
+            pickle.dump(self.word_map, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def load(self, path):
+        with open(path, "rb") as f:
+            self.word_map = pickle.load(f)
+
+
+def fit(w2v, ds, iters=1000, window_rad=4, lr=1e-4, batch_size=32, sample_size=32, beta=0.9):
+
+    iterds = itertools.cycle(ds["train"])
+
+    do_batch = np.zeros((batch_size, 256))
+    dc_batch = np.zeros((batch_size, 256))
+
+    b_idx = 0
+
+    O_batch = []
+    O_words_batch = [] # list(list(str))
+
+    c_batch = []
+    c_words_batch = [] # list(str)
+
+
+    momentum = {}
+
+
+    for i in range(iters):
+        x = next(iterds)
+        no_punc = re.sub("[^\w\s]", "", x["text"])
+        words = no_punc.lower().split()
+
+
+
+        for i in range(len(words)):
+            
+            # Collect outer words 
+            O = []
+            o_words_visited = []
+            for j in range(-window_rad, window_rad):
+                if j == 0:
+                    continue
+                try:
+                    O.append(w2v.word_map[words[i + j]][0])
+                except:
+                    continue
+                o_words_visited.append(words[i + j])
+
+            # Collect center word
+            try: 
+                c = w2v.word_map[words[i]][1]
+            except:
+                continue
+            c_word_visited = words[i]
+
+            try:
+                O = np.concatenate(O, axis=0)
+                O_batch.append(O)
+                O_words_batch.append(o_words_visited)
+                c_batch.append(c)
+                c_words_batch.append(c_word_visited)
+
+                b_idx += 1
+            except:
+                pass
+
+
+            if b_idx >= batch_size:
+                # compute gradients
+                batch_grads = grad_batch(O_batch, c_batch, O_words_batch, c_words_batch, w2v.word_map, sample_size=sample_size)
+                
+                for key in batch_grads:
+                    if key not in momentum:
+                        momentum[key] = [np.zeros((1, 256)), np.zeros((1, 256))]
+                    momentum[key][0] = beta * momentum[key][0] + (1 - beta) * batch_grads[key][0]
+                    momentum[key][1] = beta * momentum[key][1] + (1 - beta) * batch_grads[key][1]
+
+                    w2v.word_map[key][0] = w2v.word_map[key][0] - lr * momentum[key][0]
+                    w2v.word_map[key][1] = w2v.word_map[key][1] - lr * momentum[key][1]
+                
+                l = loss_batch(O_batch, c_batch, w2v.word_map, sample_size=sample_size)
+                print(l)
+
+
+                O_batch = []
+                O_words_batch = [] # list(list(str))
+
+                c_batch = []
+                c_words_batch = [] # list(str)
+
+                b_idx = 0
+    
+    return w2v
+
+
+            
+
+def loss(o, c, word_map, sample_size=32):
+    all_keys = word_map.keys()
+    keys = random.sample(all_keys, sample_size)
+
+    n_o = []
+
+    for key in keys:
+        n_o.append(word_map[key][0])
+    n_o = np.concatenate(n_o, axis=0)
+
+    return -np.log(sig(np.dot(c, o.T))) - np.sum(np.log(sig(-np.dot(n_o, c.T))))
+
+
+def loss_batch(O, C, word_map, sample_size=32):
+
+    batch_size = len(O)
+    l = 0
+    for k in range(batch_size):
+        c = C[k]
+        for i in range(O[k].shape[0]):
+            o = np.expand_dims(O[k][i], axis=0)
+            l += loss(o, c, word_map=word_map, sample_size=sample_size)
+    return l / 32
+
+
+def sig(x):
+    return 1 / (1 + np.exp(-x))
+        
+    
+
+def grad(o, c, word_map, sample_size=32):
+    all_keys = list(word_map.keys())
+    keys = random.sample(all_keys, sample_size)
+
+    n_o = []
+
+    for key in keys:
+        n_o.append(word_map[key][0])
+    n_o = np.concatenate(n_o, axis=0)
+
+    p_sim = sig(np.dot(c, o.T))
+
+    do = -c  * (1 - p_sim)
+    dc = -o * (1 - p_sim) - np.sum((1 - sig(np.dot(n_o, c.T))) * n_o, axis=0)
+
+    # Compute the negative derivatives
+    dns = []
+    dn_words = []
+
+    for i in range(n_o.shape[0]):
+        n_oi = np.expand_dims(n_o[i], axis=0)
+        dn_i = -c * (1-np.log(sig(np.dot(n_oi, c.T))))
+        dns.append(dn_i)
+        dn_words.append(keys[i])
+
+    # print(dc)
+
+    return do, dc, dns, dn_words
+    
+def grad_batch(O, C, O_words, C_words, word_map, sample_size=32):
+
+    grads = {}
+    batch_size = len(O)
+    for k in range(batch_size):
+        c = C[k]
+        c_word = C_words[k]
+        for i in range(O[k].shape[0]):
+            o = np.expand_dims(O[k][i], axis=0)
+            o_word = O_words[k][i]
+            do, dc, dns, dn_words = grad(o, c, word_map, sample_size=sample_size)
+
+            if o_word not in grads:
+                grads[o_word] = [np.zeros((1, 256)), np.zeros((1, 256))]
+            grads[o_word][0] += do / batch_size
+
+            if c_word not in grads:
+                grads[c_word] = [np.zeros((1, 256)), np.zeros((1, 256))]
+            grads[c_word][1] += dc / (batch_size * O[k].shape[0])
+
+            for j in range(len(dns)):
+                if dn_words[i] not in grads:
+                    grads[dn_words[i]] = [np.zeros((1, 256)), np.zeros((1, 256))]
+                grads[dn_words[i]][0] += dns[i] / (batch_size)
+
+    
+    return grads
+
+
+
 
 
 
@@ -75,6 +276,12 @@ class Word2Vec:
 
 if __name__ == "__main__":
     ds = load_dataset("wikipedia", "20220301.en")
+
+    # ds = {
+    #     "train" : [
+    #         {"text": "the quick brown fox jumped over the lazy dog"}, 
+    #     ]
+    # }
     iterds = iter(ds["train"])
     lines = next(iterds)
 
@@ -83,6 +290,11 @@ if __name__ == "__main__":
     pprint(w2v.word_count, sort_dicts=False)
     # print(w2v.word_map)
     # x = input()
+
+    w2v = fit(w2v, ds, iters=100000, window_rad=3, lr=1e-2, batch_size=32, sample_size=10)
+    w2v.save("test")
+
+
 
     
 
