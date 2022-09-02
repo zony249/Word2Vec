@@ -223,7 +223,7 @@ def grad(o, c, word_map, sample_size=32):
     p_sim = sig(np.dot(c, o.T))
 
     do = -c  * (1 - p_sim)
-    dc = -o * (1 - p_sim) - np.sum((1 - sig(np.dot(n_o, c.T))) * n_o, axis=0)
+    dc = -o * (1 - p_sim) + np.sum((1 - sig(np.dot(n_o, c.T))) * n_o, axis=0)
 
     # Compute the negative derivatives
     dns = []
@@ -231,7 +231,7 @@ def grad(o, c, word_map, sample_size=32):
 
     for i in range(n_o.shape[0]):
         n_oi = np.expand_dims(n_o[i], axis=0)
-        dn_i = -c * (1-np.log(sig(np.dot(n_oi, c.T))))
+        dn_i = c * (1-np.log(sig(np.dot(n_oi, c.T))))
         dns.append(dn_i)
         dn_words.append(keys[i])
 
@@ -282,6 +282,8 @@ if __name__ == "__main__":
     #         {"text": "the quick brown fox jumped over the lazy dog"}, 
     #     ]
     # }
+
+    
     iterds = iter(ds["train"])
     lines = next(iterds)
 
@@ -291,7 +293,7 @@ if __name__ == "__main__":
     # print(w2v.word_map)
     # x = input()
 
-    w2v = fit(w2v, ds, iters=100000, window_rad=3, lr=1e-2, batch_size=32, sample_size=10)
+    w2v = fit(w2v, ds, iters=100000, window_rad=4, lr=1e-3, batch_size=32, sample_size=10)
     w2v.save("test")
 
 
